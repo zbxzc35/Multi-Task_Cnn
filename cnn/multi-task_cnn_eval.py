@@ -10,6 +10,7 @@ import numpy as np
 import tensorflow as tf
 
 import cnn
+import gen_tfrecord
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -23,41 +24,18 @@ tf.app.flags.DEFINE_string('checkpoint_dir', '/home/admin/zhexuanxu/multi-task_c
                            """Directory where to read model checkpoints.""")
 tf.app.flags.DEFINE_integer('eval_interval_secs', 60 * 5,
                             """How often to run the eval.""")
-tf.app.flags.DEFINE_integer('num_examples', 2000,
+tf.app.flags.DEFINE_integer('num_examples', 20000,
                             """Number of examples to run.""")
 tf.app.flags.DEFINE_boolean('run_once', True,
                          """Whether to run eval only once.""")
 
 abspath = os.path.abspath('..')
 num_splits_path = os.path.join(abspath, 'data/num_splits')
+meta_path = os.path.join(abspath, 'data/batches.meta')
+NUM_CLASSES, attrs_labels, attrs_hots = gen_tfrecord.obtain_attrs(meta_path) 
 
-def obtain_splits(filepath):
-    num_splits = []
-    with open(filepath, 'r') as f:
-        for line in f.readlines():
-            num_splits.append(int(line.strip()))
-    return num_splits
 
-def calcuate_prediction(logits, labels, num_splits):
-    logits_split = tf.split(logits, num_splits, 1)
-    
-    labels = tf.cast(labels, tf.float32)
-    labels_split = tf.split(labels, num_splits, 1)
-
-    correct_prediction = tf.cast(tf.equal(tf.argmax(logits_split[0], 1), tf.argmax(labels_split[0], 1)), tf.float32)
-    correct_prediction = tf.multiply(correct_prediction, tf.reduce_sum(labels_split[0], 1))
-    accuracy = tf.div(tf.reduce_sum(correct_prediction), tf.reduce_sum(labels_split[0]))
-    pred = tf.expand_dims(accuracy, 0)
-    for i in range(1, len(labels_split)):
-        correct_prediction = tf.cast(tf.equal(tf.argmax(logits_split[i], 1), tf.argmax(labels_split[i], 1)), tf.float32)
-        correct_prediction = tf.multiply(correct_prediction, tf.reduce_sum(labels_split[i], 1))
-        accuracy = tf.div(tf.reduce_sum(correct_prediction), tf.reduce_sum(labels_split[i]))
-        pred = tf.concat([tf.reshape(pred, [-1]), tf.expand_dims(accuracy, 0)], axis=0)
-    tf.summary.histogram("prediction", pred) 
-
-    return pred   
-
-def eval_once(saver, summary_writer, summary_op, pred):
+def eval_once(saver, summary_writer, summary_op, pred, images, logits, labels, num_splits):
     """Run Eval once.
     Args:
       saver: Saver.
@@ -89,14 +67,13 @@ def eval_once(saver, summary_writer, summary_op, pred):
             num_iter = int(math.floor(FLAGS.num_examples / FLAGS.eval_batch_size))
             total_sample_count = num_iter * FLAGS.eval_batch_size
             step = 0
-            precisions = sess.run([pred])
-            #print precisions
-            with open('test', 'wb') as f:
-                while step < num_iter and not coord.should_stop():
-                    p = sess.run([pred])
-                    #print p
-                    precisions = np.concatenate([precisions, p], axis=0)
-                    step += 1
+            precisions, imag, logi, labe, nsplit = sess.run([pred, images, logits, labels, num_splits])
+            precisions = [precisions]
+            while step < num_iter and not coord.should_stop():
+                p, imag, logi, labe, nsplit = sess.run([pred, images, logits, labels, num_splits])
+                precisions = np.concatenate([precisions, [p]], axis=0)
+                step += 1
+
             precisions = np.mean(precisions, axis=0)
             # Compute precision @ 1.
             print('{}: precision @ 1 = {}'.format(datetime.now(), precisions))
@@ -116,8 +93,8 @@ def evaluate():
     """Eval Multi-task_cnn for a number of steps."""
     with tf.Graph().as_default() as g:
         # Get images and labels for Multi-task_cnn.
-        eval_data = FLAGS.eval_data == 'test'
-        images, labels, hots = cnn.inputs(FLAGS.eval_batch_size)
+        # eval_data = FLAGS.eval_data == 'test'
+        images, labels, neg_labels, hots = cnn.inputs(eval_data=True, batch_size=FLAGS.eval_batch_size)
       
         # Build a Graph that computes the logits predictions from the
         # inference model.
@@ -126,9 +103,9 @@ def evaluate():
         hots = tf.cast(hots, tf.float32)
         logits = tf.multiply(logits, hots, name='assign_label')
 
-        num_splits = tf.constant(obtain_splits(num_splits_path))
+        num_splits = tf.constant(cnn.obtain_splits(num_splits_path))
         # Calculate predictions.
-        pred = calcuate_prediction(logits, labels, num_splits)
+        pred = cnn.calcuate_prediction(logits, labels, num_splits)
 
         # Restore the moving average version of the learned variables for eval.
         variable_averages = tf.train.ExponentialMovingAverage(
@@ -142,7 +119,7 @@ def evaluate():
         summary_writer = tf.summary.FileWriter(FLAGS.eval_dir, g)
 
         while True:
-            eval_once(saver, summary_writer, summary_op, pred)
+            eval_once(saver, summary_writer, summary_op, pred, images, logits, labels, num_splits)
             if FLAGS.run_once:
                 break
             time.sleep(FLAGS.eval_interval_secs)

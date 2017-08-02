@@ -17,14 +17,14 @@ FLAGS = tf.app.flags.FLAGS
 tf.app.flags.DEFINE_string('train_dir', '/home/admin/zhexuanxu/multi-task_cnn/tmp',
                            """Directory where to write event logs """
                            """and checkpoint.""")
-tf.app.flags.DEFINE_integer('max_steps', 10000,
+tf.app.flags.DEFINE_integer('max_steps', 100000,
                             """Number of batches to run.""")
 tf.app.flags.DEFINE_integer('num_gpus', 4,
                             """How many GPUs to use.""")
 tf.app.flags.DEFINE_boolean('log_device_placement', False,
                             """Whether to log device placement.""")
 
-def tower_loss(scope, images, labels, hots):
+def tower_loss(scope, images, labels, neg_labels, hots):
     """Calculate the total loss on a single tower running the multi-task_cnn model.
     Args:
       scope: unique prefix string identifying the multi-task_cnn tower, e.g. 'tower_0'
@@ -39,7 +39,7 @@ def tower_loss(scope, images, labels, hots):
 
     # Build the portion of the Graph calculating the losses. Note that we will
     # assemble the total_loss using a custom function below.
-    _ = cnn.loss(logits, labels, hots)
+    _ = cnn.loss(logits, labels, neg_labels, hots, loss_type=1)
 
     # Assemble all of the losses for the current tower only.
     losses = tf.get_collection('losses', scope)
@@ -118,9 +118,9 @@ if __name__ == '__main__':
         opt = tf.train.GradientDescentOptimizer(lr)
 
         # Get images and labels for multi-task_cnn.
-        images, labels, hots = cnn.inputs()
+        images, labels, neg_labels, hots = cnn.inputs(256)
         batch_queue = tf.contrib.slim.prefetch_queue.prefetch_queue(
-            [images, labels, hots], capacity=2 * FLAGS.num_gpus)
+            [images, labels, neg_labels, hots], capacity=2 * FLAGS.num_gpus)
         # Calculate the gradients for each model tower.
         tower_grads = []
         with tf.variable_scope(tf.get_variable_scope()):
@@ -128,11 +128,11 @@ if __name__ == '__main__':
                 with tf.device('/gpu:%d' % i):
                     with tf.name_scope('%s_%d' % (cnn.TOWER_NAME, i)) as scope:
                         # Dequeues one batch for the GPU
-                        image_batch, label_batch, hots_batch = batch_queue.dequeue()
+                        image_batch, label_batch, neg_label_batch, hots_batch = batch_queue.dequeue()
                         # Calculate the loss for one tower of the multi-task_cnn model. This function
                         # constructs the entire multi-task_cnn model but shares the variables across
                         # all towers.
-                        loss = tower_loss(scope, image_batch, label_batch, hots_batch)
+                        loss = tower_loss(scope, image_batch, label_batch, neg_label_batch, hots_batch)
 
                         # Reuse variables for the next tower.
                         tf.get_variable_scope().reuse_variables()
@@ -150,7 +150,7 @@ if __name__ == '__main__':
         # synchronization point across all towers.
         grads = average_gradients(tower_grads)
 
-        #lst = cnn.getloss()
+        loss_list = cnn.getloss()
 
         # Add a summary to track the learning rate.
         summaries.append(tf.summary.scalar('learning_rate', lr))
@@ -172,6 +172,19 @@ if __name__ == '__main__':
             cnn.MOVING_AVERAGE_DECAY, global_step)
         variables_averages_op = variable_averages.apply(tf.trainable_variables())
 
+        # calculate predict on valuation dataset
+        images_eval, labels_eval, neg_labels_eval, hots_eval = cnn.inputs(eval_data=True, batch_size=1000)
+        tf.get_variable_scope().reuse_variables()
+        logits_eval = cnn.inference(images_eval, n_cnn=5)
+                
+        hots_eval = tf.cast(hots_eval, tf.float32)
+        logits_eval = tf.multiply(logits_eval, hots_eval, name='assign_label_eval')
+
+        num_splits = tf.constant(cnn.obtain_splits(FLAGS.num_splits_dir))
+        # Calculate predictions.
+        pred = cnn.calcuate_prediction(logits_eval, labels_eval, num_splits)
+
+
         # Group all updates to into a single train op.
         train_op = tf.group(apply_gradient_op, variables_averages_op)
 
@@ -192,6 +205,14 @@ if __name__ == '__main__':
             log_device_placement=FLAGS.log_device_placement))
         sess.run(init)
 
+        ckpt = tf.train.get_checkpoint_state(FLAGS.train_dir)
+        if ckpt and ckpt.model_checkpoint_path:
+            # Restores from checkpoint
+            saver.restore(sess, ckpt.model_checkpoint_path)
+            print ("restore from file")
+        else:
+            print('No checkpoint file found')
+
         # Start the queue runners.
         tf.train.start_queue_runners(sess=sess)
 
@@ -199,14 +220,9 @@ if __name__ == '__main__':
 
         for step in xrange(FLAGS.max_steps):
             start_time = time.time()
-            _, loss_value = sess.run([train_op, loss])
+            _, loss_value, los_list = sess.run([train_op, loss, loss_list])
             duration = time.time() - start_time
 
-         #   lsst = sess.run(lst)
-
-         #   print len(lsst)
-         #   for loss_item in lsst:
-         #       print loss_item
 
             assert not np.isnan(loss_value), 'Model diverged with loss = NaN'
 
@@ -214,19 +230,23 @@ if __name__ == '__main__':
                 num_examples_per_step = FLAGS.batch_size * FLAGS.num_gpus
                 examples_per_sec = num_examples_per_step / duration
                 sec_per_batch = duration / FLAGS.num_gpus
-
+                
                 format_str = ('%s: step %d, loss = %.2f (%.1f examples/sec; %.3f '
                               'sec/batch)')
                 print(format_str % (datetime.now(), step, loss_value,
                                     examples_per_sec, sec_per_batch))
-
+               
             if step % 100 == 0:
                 summary_str = sess.run(summary_op)
                 summary_writer.add_summary(summary_str, step)
-
+    
             # Save the model checkpoint periodically.
             if step % 1000 == 0 or (step + 1) == FLAGS.max_steps:
                 checkpoint_path = os.path.join(FLAGS.train_dir, 'model.ckpt')
                 saver.save(sess, checkpoint_path, global_step=step)
+
+                precision = np.mean(sess.run(pred))
+                with open('precision_eval', 'a') as f:
+                    f.write('{}\t{}\n'.format(step,precision))
 
 

@@ -16,14 +16,14 @@ IMAGE_SIZE = gen_tfrecord.IMAGE_SIZE
 
 NUM_CLASSES = gen_tfrecord.NUM_CLASSES
 IMAGE_SIZE = gen_tfrecord.IMAGE_SIZE
-NUM_EXAMPLES_PER_EPOCH_FOR_TRAIN = 72501
+NUM_EXAMPLES_PER_EPOCH_FOR_TRAIN = 476466
 NUM_EXAMPLES_PER_EPOCH_FOR_EVAL = 1000
 
 # Constants describing the training process.
 MOVING_AVERAGE_DECAY = 0.9999     # The decay to use for the moving average.
 NUM_EPOCHS_PER_DECAY = 350.0      # Epochs after which learning rate decays.
 LEARNING_RATE_DECAY_FACTOR = 0.1  # Learning rate decay factor.
-INITIAL_LEARNING_RATE = 0.001       # Initial learning rate.
+INITIAL_LEARNING_RATE = 0.01       # Initial learning rate.
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -34,6 +34,8 @@ tf.app.flags.DEFINE_integer('batch_size', 128,
 #                           """Path to the CIFAR-10 data directory.""")
 tf.app.flags.DEFINE_boolean('use_fp16', False,
                             """Train the model using fp16.""")
+tf.app.flags.DEFINE_string('num_splits_dir', '/home/admin/zhexuanxu/multi-task_cnn/data/num_splits',
+                            """Directory where to obtain number of attributes""")
 
 
 
@@ -42,7 +44,7 @@ tf.app.flags.DEFINE_boolean('use_fp16', False,
 # names of the summaries when visualizing a model.
 TOWER_NAME = 'tower'
 
-def inputs(batch_size=128):
+def inputs(eval_data=False, batch_size=128):
     """Construct distorted input for muliti-task_cnn training using the Reader ops.
     Returns:
       images: Images. 4D tensor of [batch_size, IMAGE_SIZE, IMAGE_SIZE, 3] size.
@@ -51,11 +53,14 @@ def inputs(batch_size=128):
       ValueError: If no data_dir
     """
     abspath = os.path.abspath('..')
-    input_file = os.path.join(abspath, 'data/data_train_1.bin')
+    train_input_file = os.path.join(abspath, 'data/data_train.bin')
+    eval_input_file = os.path.join(abspath, 'data/test.bin')
+    if not eval_data:
+        images, labels, neg_labels, hots = gen_tfrecord.decode_from_tfrecord(train_input_file, batch_size)
+    else:
+        images, labels, neg_labels, hots = gen_tfrecord.decode_from_tfrecord(eval_input_file, batch_size)
 
-    images, labels, hots = gen_tfrecord.decode_from_tfrecord(input_file, batch_size)
-
-    return images, labels, hots
+    return images, labels, neg_labels, hots
 
 def _activation_summary(x):
     """Helper to create summaries for activations.
@@ -91,7 +96,6 @@ def _variable_on_cpu(name, shape, initializer):
 
 def _variable_with_weight_decay(name, shape, wd=None):
     """Helper to create an initialized Variable with weight decay.
-    Note that the Variable is initialized with a truncated normal distribution.
     A weight decay is added only if one is specified.
     Args:
       name: name of the variable
@@ -206,19 +210,28 @@ def inference(images, n_cnn):
             view_pool.append(reshape)
 
     concat5 = _view_pool('concat5',view_pool)
-    fc6 = _fc('fc6', concat5, 4096)
-    fc7 = _fc('fc7', fc6, 4096)
+    fc6 = _fc('fc6', concat5, 4096, dropout=0.6)
+    fc7 = _fc('fc7', fc6, 4096, dropout=0.6)
     fc8 = _fc('fc8', fc7, NUM_CLASSES)
 
     return fc8
 
-def loss(logits, labels, hots):
+def obtain_splits(filepath):
+    num_splits = []
+    with open(filepath, 'r') as f:
+        for line in f.readlines():
+            num_splits.append(int(line.strip()))
+    return num_splits
+
+def loss(logits, labels, neg_labels, hots, loss_type=1):
     """Add L2Loss to all the trainable variables.
     Add summary for "Loss" and "Loss/avg".
     Args:
       logits: Logits from inference().
       labels: Labels from distorted_inputs or inputs(). 1-D tensor
-              of shape [batch_size]
+              of shape [batch_size, NUM_CLASSES]
+      hots: hots from inputs(), shape: [batch_size, NUM_CLASSES]
+      loss_type: 1: softmax_cross_entropy; 2: hingeloss
     Returns:
       Loss tensor of type float.
     """
@@ -227,20 +240,72 @@ def loss(logits, labels, hots):
     hots = tf.cast(hots, dtype)
     logits = tf.multiply(logits, hots, name='assign_label')
     logits = tf.nn.softmax(logits)
-
-    # We first need to convert binary labels to -1/1 labels (as floats).
-    labels = tf.cast(labels, tf.float32)
-    all_ones = array_ops.ones_like(labels)
-    labels = math_ops.subtract(2 * labels, all_ones)
-        
-    hinge_loss = tf.nn.relu(math_ops.subtract(all_ones, math_ops.multiply(labels, logits))) ** 2 / 2.0
-    hinge_loss_sum = tf.reduce_sum(hinge_loss, name='hinge_loss')
     
-    tf.add_to_collection('losses', hinge_loss_sum)
+    if loss_type == 1:
+        num_splits = tf.constant(obtain_splits(FLAGS.num_splits_dir))
+        logits_split = tf.split(logits, num_splits, 1)
+        labels_split = tf.split(labels, num_splits, 1)
+        for i in xrange(len(labels_split)):
+            cross_entropy = tf.nn.softmax_cross_entropy_with_logits(
+                        labels=labels_split[i], logits=logits_split[i]
+                        )
+            cross_entropy_mean = tf.reduce_mean(cross_entropy, name='cross_entropy_{}'.format(i))
+            tf.add_to_collection('losses', cross_entropy_mean)
+    elif loss_type == 2:
+        # We first need to convert binary labels to -1/1 labels (as floats).
+        labels = tf.cast(labels, tf.float32)
+        all_ones = array_ops.ones_like(labels)
+        labels = math_ops.subtract(2 * labels, all_ones)
+        
+        logits = tf.nn.softmax(logits)
+        hinge_loss = tf.nn.relu(math_ops.subtract(all_ones, math_ops.multiply(labels, logits))) ** 2 / 2.0
+        hinge_loss_sum = tf.reduce_sum(hinge_loss, name='hinge_loss')
+        tf.add_to_collection('losses', hinge_loss_sum)
+    elif loss_type == 3:
+        num_splits = tf.constant(obtain_splits(FLAGS.num_splits_dir))
+        logits_split = tf.split(logits, num_splits, 1)
+        labels_split = tf.split(labels, num_splits, 1)
+        neg_labels_split = tf.split(neg_labels, num_splits, 1)
+
+        for i in xrange(len(labels_split)):
+            cross_entropy = tf.nn.softmax_cross_entropy_with_logits(
+                        labels=labels_split[i], logits=logits_split[i]
+                        )
+            cross_entropy_mean = tf.reduce_mean(cross_entropy, name='cross_entropy_{}'.format(i))
+            
+            cross_entropy_neg = tf.nn.softmax_cross_entropy_with_logits(
+                        labels=neg_labels_split[i], logits=logits_split[i]
+                        )
+            cross_entropy_mean_neg = tf.reduce_mean(cross_entropy_neg, name='cross_entropy_neg_{}'.format(i))
+            
+            neg_loss = tf.add(10.0, tf.subtract(cross_entropy_mean, cross_entropy_mean_neg), name='neg_loss')
+            tf.add_to_collection('losses', neg_loss)
 
     # The total loss is defined as the cross entropy loss plus all of the weight
     # decay terms (L2 loss).
     return tf.add_n(tf.get_collection('losses'), name='total_loss')
+
+    
+def calcuate_prediction(logits, labels, num_splits):
+    logits_split = tf.split(logits, num_splits, 1)
+    
+    labels = tf.cast(labels, tf.float32)
+    labels_split = tf.split(labels, num_splits, 1)
+
+    correct_prediction = tf.cast(tf.equal(tf.argmax(logits_split[0], 1), tf.argmax(labels_split[0], 1)), tf.float32)
+    correct_prediction = tf.multiply(correct_prediction, tf.reduce_sum(labels_split[0], 1))
+    accuracy = tf.div(tf.reduce_sum(correct_prediction), tf.reduce_sum(labels_split[0]))
+    pred = tf.expand_dims(accuracy, 0)
+    for i in range(1, len(labels_split)):
+        correct_prediction = tf.cast(tf.equal(tf.argmax(logits_split[i], 1), tf.argmax(labels_split[i], 1)), tf.float32)
+        correct_prediction = tf.multiply(correct_prediction, tf.reduce_sum(labels_split[i], 1))
+        accuracy = tf.div(tf.reduce_sum(correct_prediction), tf.reduce_sum(labels_split[i]))
+        pred = tf.concat([tf.reshape(pred, [-1]), tf.expand_dims(accuracy, 0)], axis=0)
+    
+    tf.summary.histogram("prediction", pred) 
+
+    return pred   
+
 
 def getloss():
     return tf.get_collection('losses')
