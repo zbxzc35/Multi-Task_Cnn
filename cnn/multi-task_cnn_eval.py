@@ -14,13 +14,13 @@ import gen_tfrecord
 
 FLAGS = tf.app.flags.FLAGS
 
-tf.app.flags.DEFINE_string('eval_dir', '/home/admin/zhexuanxu/multi-task_cnn/tmp',
+tf.app.flags.DEFINE_string('eval_dir', '/home/admin/zhexuanxu/multi-task_cnn_pairwise/tmp',
                           """Directory where to write event logs.""")
 tf.app.flags.DEFINE_string('eval_data', 'test',
                            """Either 'test' or 'train_eval'.""")
 tf.app.flags.DEFINE_string('eval_batch_size', 256,
                            """Number of evaluation images to process in a batch""")
-tf.app.flags.DEFINE_string('checkpoint_dir', '/home/admin/zhexuanxu/multi-task_cnn/tmp',
+tf.app.flags.DEFINE_string('checkpoint_dir', '/home/admin/zhexuanxu/multi-task_cnn_pairwise/tmp',
                            """Directory where to read model checkpoints.""")
 tf.app.flags.DEFINE_integer('eval_interval_secs', 60 * 5,
                             """How often to run the eval.""")
@@ -34,6 +34,22 @@ num_splits_path = os.path.join(abspath, 'data/num_splits')
 meta_path = os.path.join(abspath, 'data/batches.meta')
 NUM_CLASSES, attrs_labels, attrs_hots = gen_tfrecord.obtain_attrs(meta_path) 
 
+def record_wrong_predict(images, logits, labels, num_splits):
+    with open('wrong_pred', 'wb') as f:
+        logits_split = tf.split(logits, num_splits, 1)
+        labels_split = tf.split(labels, num_splits, 1)
+        for i in range(logits.shape[0]):
+            print i
+            image = (images[i].reshape((1, 30000)) + 0.5) * 255
+            image = [str(x) for x in image[0]]
+            image = '\001'.join(image)
+            k=0
+            for j in range(len(labels_split)):
+                logit_argmax = tf.argmax(logits_split[j][i]).eval()
+                label_argmax = tf.argmax(labels_split[j][i]).eval()
+                if (label_argmax!=0) and (logit_argmax != label_argmax):
+                    f.write('{}\t{}\t{}\n'.format(image, attrs_labels[k+logit_argmax], attrs_labels[k+label_argmax]))
+                k += num_splits[j]
 
 def eval_once(saver, summary_writer, summary_op, pred, images, logits, labels, num_splits):
     """Run Eval once.
@@ -69,8 +85,11 @@ def eval_once(saver, summary_writer, summary_op, pred, images, logits, labels, n
             step = 0
             precisions, imag, logi, labe, nsplit = sess.run([pred, images, logits, labels, num_splits])
             precisions = [precisions]
+            #record_wrong_predict(imag, logi, labe, nsplit)
+            #print precisions
             while step < num_iter and not coord.should_stop():
                 p, imag, logi, labe, nsplit = sess.run([pred, images, logits, labels, num_splits])
+                #record_wrong_predict(imag, logi, labe, nsplit)
                 precisions = np.concatenate([precisions, [p]], axis=0)
                 step += 1
 
@@ -94,7 +113,7 @@ def evaluate():
     with tf.Graph().as_default() as g:
         # Get images and labels for Multi-task_cnn.
         # eval_data = FLAGS.eval_data == 'test'
-        images, labels, neg_labels, hots = cnn.inputs(eval_data=True, batch_size=FLAGS.eval_batch_size)
+        images, labels, hots = cnn.inputs(eval_data=True, batch_size=FLAGS.eval_batch_size)
       
         # Build a Graph that computes the logits predictions from the
         # inference model.

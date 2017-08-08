@@ -14,17 +14,17 @@ import cnn
 
 FLAGS = tf.app.flags.FLAGS
 
-tf.app.flags.DEFINE_string('train_dir', '/home/admin/zhexuanxu/multi-task_cnn/tmp',
+tf.app.flags.DEFINE_string('train_dir', '/home/admin/zhexuanxu/multi-task_cnn_pairwise/tmp',
                            """Directory where to write event logs """
                            """and checkpoint.""")
-tf.app.flags.DEFINE_integer('max_steps', 100000,
+tf.app.flags.DEFINE_integer('max_steps', 50000,
                             """Number of batches to run.""")
 tf.app.flags.DEFINE_integer('num_gpus', 4,
                             """How many GPUs to use.""")
 tf.app.flags.DEFINE_boolean('log_device_placement', False,
                             """Whether to log device placement.""")
 
-def tower_loss(scope, images, labels, neg_labels, hots):
+def tower_loss(scope, images1, labels1, hots1, images2, labels2, hots2):
     """Calculate the total loss on a single tower running the multi-task_cnn model.
     Args:
       scope: unique prefix string identifying the multi-task_cnn tower, e.g. 'tower_0'
@@ -35,11 +35,14 @@ def tower_loss(scope, images, labels, neg_labels, hots):
     """
 
     # Build inference Graph.
-    logits = cnn.inference(images, n_cnn=5)
+    logits1 = cnn.inference(images1, n_cnn=5)
+
+    tf.get_variable_scope().reuse_variables()
+    logits2 = cnn.inference(images2, n_cnn=5)
 
     # Build the portion of the Graph calculating the losses. Note that we will
     # assemble the total_loss using a custom function below.
-    _ = cnn.loss(logits, labels, neg_labels, hots, loss_type=1)
+    _ = cnn.loss(logits1, labels1,  hots1, logits2, labels2, hots2, loss_type=1)
 
     # Assemble all of the losses for the current tower only.
     losses = tf.get_collection('losses', scope)
@@ -118,9 +121,9 @@ if __name__ == '__main__':
         opt = tf.train.GradientDescentOptimizer(lr)
 
         # Get images and labels for multi-task_cnn.
-        images, labels, neg_labels, hots = cnn.inputs(256)
+        images1, labels1, hots1, images2, labels2, hots2 = cnn.inputs(eval_data=False, batch_size=256)
         batch_queue = tf.contrib.slim.prefetch_queue.prefetch_queue(
-            [images, labels, neg_labels, hots], capacity=2 * FLAGS.num_gpus)
+            [images1, labels1, hots1, images2, labels2, hots2], capacity=2 * FLAGS.num_gpus)
         # Calculate the gradients for each model tower.
         tower_grads = []
         with tf.variable_scope(tf.get_variable_scope()):
@@ -128,11 +131,11 @@ if __name__ == '__main__':
                 with tf.device('/gpu:%d' % i):
                     with tf.name_scope('%s_%d' % (cnn.TOWER_NAME, i)) as scope:
                         # Dequeues one batch for the GPU
-                        image_batch, label_batch, neg_label_batch, hots_batch = batch_queue.dequeue()
+                        image1_batch, label1_batch, hots1_batch, image2_batch, label2_batch, hots2_batch = batch_queue.dequeue()
                         # Calculate the loss for one tower of the multi-task_cnn model. This function
                         # constructs the entire multi-task_cnn model but shares the variables across
                         # all towers.
-                        loss = tower_loss(scope, image_batch, label_batch, neg_label_batch, hots_batch)
+                        loss = tower_loss(scope, image1_batch, label1_batch, hots1_batch, image2_batch, label2_batch, hots2_batch)
 
                         # Reuse variables for the next tower.
                         tf.get_variable_scope().reuse_variables()
@@ -173,7 +176,7 @@ if __name__ == '__main__':
         variables_averages_op = variable_averages.apply(tf.trainable_variables())
 
         # calculate predict on valuation dataset
-        images_eval, labels_eval, neg_labels_eval, hots_eval = cnn.inputs(eval_data=True, batch_size=1000)
+        images_eval, labels_eval, hots_eval = cnn.inputs(eval_data=True, batch_size=1000)
         tf.get_variable_scope().reuse_variables()
         logits_eval = cnn.inference(images_eval, n_cnn=5)
                 
@@ -181,7 +184,6 @@ if __name__ == '__main__':
         logits_eval = tf.multiply(logits_eval, hots_eval, name='assign_label_eval')
 
         num_splits = tf.constant(cnn.obtain_splits(FLAGS.num_splits_dir))
-        # Calculate predictions.
         pred = cnn.calcuate_prediction(logits_eval, labels_eval, num_splits)
 
 
@@ -223,7 +225,6 @@ if __name__ == '__main__':
             _, loss_value, los_list = sess.run([train_op, loss, loss_list])
             duration = time.time() - start_time
 
-
             assert not np.isnan(loss_value), 'Model diverged with loss = NaN'
 
             if step % 10 == 0:
@@ -235,11 +236,15 @@ if __name__ == '__main__':
                               'sec/batch)')
                 print(format_str % (datetime.now(), step, loss_value,
                                     examples_per_sec, sec_per_batch))
-               
+            
+                
             if step % 100 == 0:
                 summary_str = sess.run(summary_op)
                 summary_writer.add_summary(summary_str, step)
     
+                for loss_item in los_list:
+                    print loss_item
+
             # Save the model checkpoint periodically.
             if step % 1000 == 0 or (step + 1) == FLAGS.max_steps:
                 checkpoint_path = os.path.join(FLAGS.train_dir, 'model.ckpt')

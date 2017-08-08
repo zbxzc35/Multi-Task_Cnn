@@ -34,7 +34,7 @@ tf.app.flags.DEFINE_integer('batch_size', 128,
 #                           """Path to the CIFAR-10 data directory.""")
 tf.app.flags.DEFINE_boolean('use_fp16', False,
                             """Train the model using fp16.""")
-tf.app.flags.DEFINE_string('num_splits_dir', '/home/admin/zhexuanxu/multi-task_cnn/data/num_splits',
+tf.app.flags.DEFINE_string('num_splits_dir', '/home/admin/zhexuanxu/multi-task_cnn_pairwise/data/num_splits',
                             """Directory where to obtain number of attributes""")
 
 
@@ -56,11 +56,11 @@ def inputs(eval_data=False, batch_size=128):
     train_input_file = os.path.join(abspath, 'data/data_train.bin')
     eval_input_file = os.path.join(abspath, 'data/test.bin')
     if not eval_data:
-        images, labels, neg_labels, hots = gen_tfrecord.decode_from_tfrecord(train_input_file, batch_size)
+        images1, labels1, hots1, images2, labels2, hots2 = gen_tfrecord.decode_from_tfrecord_pair(train_input_file, batch_size)
+        return images1, labels1, hots1, images2, labels2, hots2
     else:
-        images, labels, neg_labels, hots = gen_tfrecord.decode_from_tfrecord(eval_input_file, batch_size)
-
-    return images, labels, neg_labels, hots
+        images, labels, hots = gen_tfrecord.decode_from_tfrecord(eval_input_file, batch_size)
+        return images, labels, hots
 
 def _activation_summary(x):
     """Helper to create summaries for activations.
@@ -223,7 +223,7 @@ def obtain_splits(filepath):
             num_splits.append(int(line.strip()))
     return num_splits
 
-def loss(logits, labels, neg_labels, hots, loss_type=1):
+def loss(logits1, labels1, hots1, logits2, labels2, hots2, loss_type=1):
     """Add L2Loss to all the trainable variables.
     Add summary for "Loss" and "Loss/avg".
     Args:
@@ -235,22 +235,35 @@ def loss(logits, labels, neg_labels, hots, loss_type=1):
     Returns:
       Loss tensor of type float.
     """
-    # Calculate the average cross entropy loss across the batch.
-    dtype = tf.float16 if FLAGS.use_fp16 else tf.float32
-    hots = tf.cast(hots, dtype)
-    logits = tf.multiply(logits, hots, name='assign_label')
-    logits = tf.nn.softmax(logits)
+    hots1 = tf.cast(hots1, tf.float32)
+    labels1 = tf.cast(labels1, tf.float32)
+    logits1 = tf.multiply(logits1, hots1)
+    labels2 = tf.cast(labels2, tf.float32)
+
+    hots2 = tf.cast(hots2, tf.float32)
+    logits2 = tf.multiply(logits2, hots2)
     
     if loss_type == 1:
         num_splits = tf.constant(obtain_splits(FLAGS.num_splits_dir))
-        logits_split = tf.split(logits, num_splits, 1)
-        labels_split = tf.split(labels, num_splits, 1)
-        for i in xrange(len(labels_split)):
-            cross_entropy = tf.nn.softmax_cross_entropy_with_logits(
-                        labels=labels_split[i], logits=logits_split[i]
-                        )
-            cross_entropy_mean = tf.reduce_mean(cross_entropy, name='cross_entropy_{}'.format(i))
-            tf.add_to_collection('losses', cross_entropy_mean)
+        logits1_split = tf.split(logits1, num_splits, 1)
+        labels1_split = tf.split(labels1, num_splits, 1)
+        logits2_split = tf.split(logits2, num_splits, 1)
+        labels2_split = tf.split(labels2, num_splits, 1)
+
+        for i in xrange(len(logits1_split)):
+            logits1_split[i] = tf.nn.softmax(logits1_split[i])
+            logits2_split[i] = tf.nn.softmax(logits2_split[i])
+
+            loss_part1_y1 = tf.reduce_sum(tf.subtract(logits1_split[i], labels1_split[i]) ** 2, axis=1)
+            loss_part1_y2 = tf.reduce_sum(tf.subtract(logits2_split[i], labels2_split[i]) ** 2, axis=1)
+            loss_part1 = tf.reduce_mean(tf.add(loss_part1_y1, loss_part1_y2), name='loss_part1')
+            tf.add_to_collection('losses', loss_part1)
+
+            diff_multi = tf.reduce_sum(tf.multiply(tf.subtract(logits1_split[i], logits2_split[i]), tf.subtract(labels1_split[i], labels2_split[i])), axis=1) 
+            m_matrix = 2 * tf.ones_like(diff_multi)
+            loss_part2 = tf.reduce_mean(tf.nn.relu(tf.subtract(m_matrix, diff_multi)), name='loss_part2')
+            tf.add_to_collection('losses', loss_part2)
+
     elif loss_type == 2:
         # We first need to convert binary labels to -1/1 labels (as floats).
         labels = tf.cast(labels, tf.float32)
