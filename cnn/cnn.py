@@ -16,7 +16,7 @@ IMAGE_SIZE = gen_tfrecord.IMAGE_SIZE
 
 NUM_CLASSES = gen_tfrecord.NUM_CLASSES
 IMAGE_SIZE = gen_tfrecord.IMAGE_SIZE
-NUM_EXAMPLES_PER_EPOCH_FOR_TRAIN = 476466
+NUM_EXAMPLES_PER_EPOCH_FOR_TRAIN = 458858
 NUM_EXAMPLES_PER_EPOCH_FOR_EVAL = 1000
 
 # Constants describing the training process.
@@ -44,23 +44,21 @@ tf.app.flags.DEFINE_string('num_splits_dir', '/home/admin/zhexuanxu/multi-task_c
 # names of the summaries when visualizing a model.
 TOWER_NAME = 'tower'
 
-def inputs(eval_data=False, batch_size=128):
-    """Construct distorted input for muliti-task_cnn training using the Reader ops.
+def inputs(input_file, eval_data=False,  batch_size=128):
+    """Construct distorted input for multi-cnns training using the Reader ops.
     Returns:
       images: Images. 4D tensor of [batch_size, IMAGE_SIZE, IMAGE_SIZE, 3] size.
-      labels: Labels. 1D tensor of [batch_size] size.
+      labels: Labels. 2D tensor of [batch_size, NUM_CLASSES] size.
+      skuid(only for evaluate data): 1D tensor of [batch_size] size.
     Raises:
       ValueError: If no data_dir
     """
-    abspath = os.path.abspath('..')
-    train_input_file = os.path.join(abspath, 'data/data_train.bin')
-    eval_input_file = os.path.join(abspath, 'data/test.bin')
     if not eval_data:
         images1, labels1, hots1, images2, labels2, hots2 = gen_tfrecord.decode_from_tfrecord_pair(train_input_file, batch_size)
         return images1, labels1, hots1, images2, labels2, hots2
     else:
-        images, labels, hots = gen_tfrecord.decode_from_tfrecord(eval_input_file, batch_size)
-        return images, labels, hots
+        images, skuid, labels, hots = gen_tfrecord.decode_from_tfrecord(input_file, batch_size, False)
+        return images, skuid, labels, hots
 
 def _activation_summary(x):
     """Helper to create summaries for activations.
@@ -210,8 +208,8 @@ def inference(images, n_cnn):
             view_pool.append(reshape)
 
     concat5 = _view_pool('concat5',view_pool)
-    fc6 = _fc('fc6', concat5, 4096, dropout=0.6)
-    fc7 = _fc('fc7', fc6, 4096, dropout=0.6)
+    fc6 = _fc('fc6', concat5, 8192, dropout=0.6)
+    fc7 = _fc('fc7', fc6, 8192, dropout=0.6)
     fc8 = _fc('fc8', fc7, NUM_CLASSES)
 
     return fc8
@@ -256,12 +254,18 @@ def loss(logits1, labels1, hots1, logits2, labels2, hots2, loss_type=1):
 
             loss_part1_y1 = tf.reduce_sum(tf.subtract(logits1_split[i], labels1_split[i]) ** 2, axis=1)
             loss_part1_y2 = tf.reduce_sum(tf.subtract(logits2_split[i], labels2_split[i]) ** 2, axis=1)
-            loss_part1 = tf.reduce_mean(tf.add(loss_part1_y1, loss_part1_y2), name='loss_part1')
+            loss_part1 = 5*tf.reduce_mean(tf.add(loss_part1_y1, loss_part1_y2), name='loss_part1')
             tf.add_to_collection('losses', loss_part1)
 
             diff_multi = tf.reduce_sum(tf.multiply(tf.subtract(logits1_split[i], logits2_split[i]), tf.subtract(labels1_split[i], labels2_split[i])), axis=1) 
-            m_matrix = 2 * tf.ones_like(diff_multi)
-            loss_part2 = tf.reduce_mean(tf.nn.relu(tf.subtract(m_matrix, diff_multi)), name='loss_part2')
+            m_matrix = tf.ones_like(diff_multi)
+            diff_relu = 5*tf.nn.relu(tf.subtract(m_matrix, diff_multi))
+
+         #   diff_multi = tf.multiply(tf.subtract(logits1_split[i], logits2_split[i]), tf.subtract(labels1_split[i], labels2_split[i])) 
+         #   m_matrix = 0.5 * tf.ones_like(diff_multi)
+         #   diff_relu = tf.reduce_sum(tf.nn.relu(tf.subtract(m_matrix, diff_multi)), axis=1)
+
+            loss_part2 = tf.reduce_mean(diff_relu, name='loss_part2')
             tf.add_to_collection('losses', loss_part2)
 
     elif loss_type == 2:
@@ -319,6 +323,38 @@ def calcuate_prediction(logits, labels, num_splits):
 
     return pred   
 
+def precision_in_top_k(logits, labels, num_splits, k):
+    logits_split = tf.split(logits, num_splits, 1)
+    labels_split = tf.split(labels, num_splits, 1)
+    
+    target = tf.argmax(labels_split[0], 1)
+    # in the top k  and orginal sku contain this attr
+    top_k_op = tf.nn.in_top_k(logits_split[0], target, k)
+    top_k = tf.logical_and(top_k_op, tf.not_equal(target, tf.zeros_like(target))) 
+    p1 = tf.reduce_sum(tf.cast(top_k, tf.float32))
+    p2 = tf.cast(tf.count_nonzero(target), tf.float32)
+    precision = tf.expand_dims(tf.div(p1 , p2), 0)
+    
+    for i in range(1, len(labels_split)):
+        target = tf.argmax(labels_split[i], 1)
+        top_k_op = tf.nn.in_top_k(logits_split[i], target, k)
+        top_k = tf.logical_and(top_k_op, tf.not_equal(target, tf.zeros_like(target)))
+        p1 = tf.reduce_sum(tf.cast(top_k, tf.float32))
+        p2 = tf.cast(tf.count_nonzero(target), tf.float32)
+        prec = tf.expand_dims(tf.div(p1 , p2), 0)
+        precision = tf.concat([precision, prec], axis=0)
+
+    return precision
+
+def predict(logits, num_splits):
+    logits_split = tf.split(logits, num_splits, 1)
+
+    predict = tf.expand_dims(tf.argmax(logits_split[0], 1), 1)
+    for i in range(1, len(logits_split)):
+        pred = tf.expand_dims(tf.argmax(logits_split[i], 1), 1)
+        predict = tf.concat([predict, pred], axis=1)
+
+    return predict
 
 def getloss():
     return tf.get_collection('losses')

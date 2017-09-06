@@ -17,6 +17,8 @@ FLAGS = tf.app.flags.FLAGS
 tf.app.flags.DEFINE_string('train_dir', '/home/admin/zhexuanxu/multi-task_cnn_pairwise/tmp',
                            """Directory where to write event logs """
                            """and checkpoint.""")
+tf.app.flags.DEFINE_string('train_data', 'home/admin/zhexuanxu/multi-task_cnn_pairwise/data/data_train.bin',
+                            """Directory where to obtain training data """)
 tf.app.flags.DEFINE_integer('max_steps', 50000,
                             """Number of batches to run.""")
 tf.app.flags.DEFINE_integer('num_gpus', 4,
@@ -121,7 +123,7 @@ if __name__ == '__main__':
         opt = tf.train.GradientDescentOptimizer(lr)
 
         # Get images and labels for multi-task_cnn.
-        images1, labels1, hots1, images2, labels2, hots2 = cnn.inputs(eval_data=False, batch_size=256)
+        images1, labels1, hots1, images2, labels2, hots2 = cnn.inputs(FLAGS.train_data, eval_data=False, batch_size=512)
         batch_queue = tf.contrib.slim.prefetch_queue.prefetch_queue(
             [images1, labels1, hots1, images2, labels2, hots2], capacity=2 * FLAGS.num_gpus)
         # Calculate the gradients for each model tower.
@@ -174,18 +176,6 @@ if __name__ == '__main__':
         variable_averages = tf.train.ExponentialMovingAverage(
             cnn.MOVING_AVERAGE_DECAY, global_step)
         variables_averages_op = variable_averages.apply(tf.trainable_variables())
-
-        # calculate predict on valuation dataset
-        images_eval, labels_eval, hots_eval = cnn.inputs(eval_data=True, batch_size=1000)
-        tf.get_variable_scope().reuse_variables()
-        logits_eval = cnn.inference(images_eval, n_cnn=5)
-                
-        hots_eval = tf.cast(hots_eval, tf.float32)
-        logits_eval = tf.multiply(logits_eval, hots_eval, name='assign_label_eval')
-
-        num_splits = tf.constant(cnn.obtain_splits(FLAGS.num_splits_dir))
-        pred = cnn.calcuate_prediction(logits_eval, labels_eval, num_splits)
-
 
         # Group all updates to into a single train op.
         train_op = tf.group(apply_gradient_op, variables_averages_op)
@@ -250,8 +240,8 @@ if __name__ == '__main__':
                 checkpoint_path = os.path.join(FLAGS.train_dir, 'model.ckpt')
                 saver.save(sess, checkpoint_path, global_step=step)
 
-                precision = np.mean(sess.run(pred))
-                with open('precision_eval', 'a') as f:
-                    f.write('{}\t{}\n'.format(step,precision))
+            #    precision = np.mean(sess.run(pred))
+            #    with open('precision_eval', 'a') as f:
+            #        f.write('{}\t{}\n'.format(step,precision))
 
 
