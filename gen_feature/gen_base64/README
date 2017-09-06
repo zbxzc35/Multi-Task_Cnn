@@ -1,2 +1,0 @@
-To run gen_base64, you need to compile tfcrc.so first. 
-Since tfrcr.so is a boost python wrapper of crc written in c++, you have to install/compile boost python. Makefile is included in crcso, edit the include and library path, then make it.

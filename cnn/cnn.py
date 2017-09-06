@@ -50,6 +50,7 @@ def inputs(input_file, eval_data=False,  batch_size=128):
       images: Images. 4D tensor of [batch_size, IMAGE_SIZE, IMAGE_SIZE, 3] size.
       labels: Labels. 2D tensor of [batch_size, NUM_CLASSES] size.
       skuid(only for evaluate data): 1D tensor of [batch_size] size.
+      hots: 2D tensor of [batche_size, NUM_CLASSES] size.
     Raises:
       ValueError: If no data_dir
     """
@@ -104,12 +105,6 @@ def _variable_with_weight_decay(name, shape, wd=None):
     Returns:
       Variable Tensor
     """
-    # dtype = tf.float16 if FLAGS.use_fp16 else tf.float32
-    #dtype = tf.float32
-    # var = _variable_on_cpu(
-    #     name,
-    #     shape,
-    #     tf.truncated_normal_initializer(stddev=stddev, dtype=dtype))
     var = _variable_on_cpu(name, shape, initializer=tf.contrib.layers.xavier_initializer())
 
     if wd is not None:
@@ -175,7 +170,7 @@ def _view_pool(name, view_features):
     return vf
 
 def inference(images, n_cnn):
-    """Build the Multi-task_cnn model.
+    """Build the Multi-CNNs model. Using Alex Net for each cnn.
      Args:
        images: Images returned from decode_from_tfrecord()
      Returns:
@@ -215,6 +210,8 @@ def inference(images, n_cnn):
     return fc8
 
 def obtain_splits(filepath):
+    """ obtain the number of each attributes
+    """
     num_splits = []
     with open(filepath, 'r') as f:
         for line in f.readlines():
@@ -224,20 +221,22 @@ def obtain_splits(filepath):
 def loss(logits1, labels1, hots1, logits2, labels2, hots2, loss_type=1):
     """Add L2Loss to all the trainable variables.
     Add summary for "Loss" and "Loss/avg".
+    When we calculate loss value, we need split output layer into each attribues;
+    In other words, we calculate loss function based on each attributes
     Args:
       logits: Logits from inference().
-      labels: Labels from distorted_inputs or inputs(). 1-D tensor
+      labels: Labels from inputs(). 2-D tensor
               of shape [batch_size, NUM_CLASSES]
       hots: hots from inputs(), shape: [batch_size, NUM_CLASSES]
-      loss_type: 1: softmax_cross_entropy; 2: hingeloss
+      loss_type: 1:pairwise loss 2: hingeloss 3: softmax_loss with negative label
     Returns:
       Loss tensor of type float.
     """
     hots1 = tf.cast(hots1, tf.float32)
     labels1 = tf.cast(labels1, tf.float32)
     logits1 = tf.multiply(logits1, hots1)
+  
     labels2 = tf.cast(labels2, tf.float32)
-
     hots2 = tf.cast(hots2, tf.float32)
     logits2 = tf.multiply(logits2, hots2)
     
@@ -261,14 +260,11 @@ def loss(logits1, labels1, hots1, logits2, labels2, hots2, loss_type=1):
             m_matrix = tf.ones_like(diff_multi)
             diff_relu = 5*tf.nn.relu(tf.subtract(m_matrix, diff_multi))
 
-         #   diff_multi = tf.multiply(tf.subtract(logits1_split[i], logits2_split[i]), tf.subtract(labels1_split[i], labels2_split[i])) 
-         #   m_matrix = 0.5 * tf.ones_like(diff_multi)
-         #   diff_relu = tf.reduce_sum(tf.nn.relu(tf.subtract(m_matrix, diff_multi)), axis=1)
-
             loss_part2 = tf.reduce_mean(diff_relu, name='loss_part2')
             tf.add_to_collection('losses', loss_part2)
 
     elif loss_type == 2:
+        # pointwise loss
         # We first need to convert binary labels to -1/1 labels (as floats).
         labels = tf.cast(labels, tf.float32)
         all_ones = array_ops.ones_like(labels)
@@ -279,6 +275,8 @@ def loss(logits1, labels1, hots1, logits2, labels2, hots2, loss_type=1):
         hinge_loss_sum = tf.reduce_sum(hinge_loss, name='hinge_loss')
         tf.add_to_collection('losses', hinge_loss_sum)
     elif loss_type == 3:
+        # pointwise loss
+        # built negative label
         num_splits = tf.constant(obtain_splits(FLAGS.num_splits_dir))
         logits_split = tf.split(logits, num_splits, 1)
         labels_split = tf.split(labels, num_splits, 1)
@@ -304,6 +302,8 @@ def loss(logits1, labels1, hots1, logits2, labels2, hots2, loss_type=1):
 
     
 def calcuate_prediction(logits, labels, num_splits):
+    """calculate prediction accuracy in each attributes
+    """
     logits_split = tf.split(logits, num_splits, 1)
     
     labels = tf.cast(labels, tf.float32)
@@ -324,6 +324,8 @@ def calcuate_prediction(logits, labels, num_splits):
     return pred   
 
 def precision_in_top_k(logits, labels, num_splits, k):
+    """calculate top-k prediction accuracy in each attributes
+    """
     logits_split = tf.split(logits, num_splits, 1)
     labels_split = tf.split(labels, num_splits, 1)
     
@@ -347,6 +349,10 @@ def precision_in_top_k(logits, labels, num_splits, k):
     return precision
 
 def predict(logits, num_splits):
+    """predict attribute value on each attribute
+    Returns:
+        predicit: 2D tensor of shape [batch_size, num_attributes]
+    """
     logits_split = tf.split(logits, num_splits, 1)
 
     predict = tf.expand_dims(tf.argmax(logits_split[0], 1), 1)

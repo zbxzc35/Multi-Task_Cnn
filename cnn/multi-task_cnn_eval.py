@@ -35,6 +35,7 @@ meta_path = os.path.join(abspath, 'data/batches.meta')
 NUM_CLASSES, attrs_labels, attrs_hots = gen_tfrecord.obtain_attrs(meta_path) 
 
 def record_wrong_predict(images, logits, labels, num_splits):
+    #record wrong predict
     with open('wrong_pred', 'wb') as f:
         logits_split = tf.split(logits, num_splits, 1)
         labels_split = tf.split(labels, num_splits, 1)
@@ -56,8 +57,8 @@ def eval_once(saver, summary_writer, summary_op, prec, images, logits, labels, n
     Args:
       saver: Saver.
       summary_writer: Summary writer.
-      top_k_op: Top K op.
       summary_op: Summary op.
+      prec: predict accuracy in top k
     """
     with tf.Session() as sess:
         ckpt = tf.train.get_checkpoint_state(FLAGS.checkpoint_dir)
@@ -125,7 +126,7 @@ def evaluate():
         num_splits = tf.constant(cnn.obtain_splits(num_splits_path))
         # Calculate predictions.
         #pred = cnn.calcuate_prediction(logits, labels, num_splits)
-        prec = cnn.precision_in_top_k(logits, labels, num_splits, 2)
+        prec = cnn.precision_in_top_k(logits, labels, num_splits, 1)
 
 
         # Restore the moving average version of the learned variables for eval.

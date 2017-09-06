@@ -240,8 +240,4 @@ if __name__ == '__main__':
                 checkpoint_path = os.path.join(FLAGS.train_dir, 'model.ckpt')
                 saver.save(sess, checkpoint_path, global_step=step)
 
-            #    precision = np.mean(sess.run(pred))
-            #    with open('precision_eval', 'a') as f:
-            #        f.write('{}\t{}\n'.format(step,precision))
-
 

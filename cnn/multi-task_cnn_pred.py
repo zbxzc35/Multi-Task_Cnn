@@ -33,6 +33,10 @@ meta_path = os.path.join(abspath, 'data/batches.meta')
 NUM_CLASSES, attrs_labels, attrs_hots = gen_tfrecord.obtain_attrs(meta_path) 
 
 def record_sku_pred(sku, multi_cnns, origin, num_splits, test_pred_file, mode):
+    """ return predict results
+    Returns:
+        skuid, cid_id, 'Original', Original_attrs, 'Multi-CNNs_image', Predict_attrs
+    """
     num_splits = num_splits.eval()
     
     with open(test_pred_file, mode) as f:
@@ -75,7 +79,6 @@ def evaluate(test_num, test_tfrecord_file, test_pred_file):
     """Eval Multi-task_cnn for a number of steps."""
     with tf.Graph().as_default() as g:
         # Get images and labels for Multi-task_cnn.
-        # eval_data = FLAGS.eval_data == 'test'
         images, skuid, labels, hots = cnn.inputs(test_tfrecord_file, eval_data=True, batch_size=FLAGS.test_batch_size)
       
         # Build a Graph that computes the logits predictions from the

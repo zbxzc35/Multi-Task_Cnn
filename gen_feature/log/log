@@ -1,4 +1,0 @@
-[TRACE] 2017-07-21.05:48:34.132 start_cnn_feature.sh[7]: Start
-[TRACE] 2017-07-21.05:48:34.140 start_cnn_feature.sh[48]: Start of generate_train_data_attr.
-Not a valid JAR: /software/servers/hadoop-2.2.0/share/hadoop/tools/lib/hadoop-streaming-2.2.0.jar
-[ERROR] 2017-07-21.05:48:36.267 start_cnn_feature.sh[56]: fail to run generate_train_data_attr
